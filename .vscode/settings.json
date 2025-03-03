@@ -1,3 +1,4 @@
 {
-    "git.ignoreLimitWarning": true
+    "git.ignoreLimitWarning": true,
+    "cmake.sourceDirectory": "/Users/adarshjohny/Personal/Studies/Trento /Advanced ML/Project/ML/relbench/pyg-lib"
 }

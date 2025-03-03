@@ -16,6 +16,11 @@ def to_unix_time(ser: pd.Series) -> np.ndarray:
         unix_time //= 10**9
     return unix_time
 
+def to_discrete_time(ser: pd.Series, interval: str = "1D") -> np.ndarray:
+    """Converts timestamps to discrete time steps based on a given interval."""
+    ser = pd.to_datetime(ser).dt.floor(interval)
+    return ser.astype("int64") // 10**9  # Convert to UNIX timestamp
+
 
 def remove_pkey_fkey(col_to_stype: Dict[str, Any], table: Table) -> dict:
     r"""Remove pkey, fkey columns since they will not be used as input feature."""

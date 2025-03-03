@@ -15,101 +15,324 @@ from torch_geometric.utils import sort_edge_index
 
 from relbench.base import Database, EntityTask, RecommendationTask, Table, TaskType
 from relbench.modeling.utils import remove_pkey_fkey, to_unix_time
+from typing import Any, Dict, List, Optional, Tuple
 
 
-def make_pkey_fkey_graph(
-    db: Database,
-    col_to_stype_dict: Dict[str, Dict[str, stype]],
-    text_embedder_cfg: Optional[TextEmbedderConfig] = None,
-    cache_dir: Optional[str] = None,
-) -> Tuple[HeteroData, Dict[str, Dict[str, Dict[StatType, Any]]]]:
-    r"""Given a :class:`Database` object, construct a heterogeneous graph with primary-
-    foreign key relationships, together with the column stats of each table.
 
-    Args:
-        db: A database object containing a set of tables.
-        col_to_stype_dict: Column to stype for
-            each table.
-        text_embedder_cfg: Text embedder config.
-        cache_dir: A directory for storing materialized tensor
-            frames. If specified, we will either cache the file or use the
-            cached file. If not specified, we will not use cached file and
-            re-process everything from scratch without saving the cache.
+# def make_pkey_fkey_graph(
+#     db: Database,
+#     col_to_stype_dict: Dict[str, Dict[str, stype]],
+#     text_embedder_cfg: Optional[TextEmbedderConfig] = None,
+#     cache_dir: Optional[str] = None,
+# ) -> Tuple[HeteroData, Dict[str, Dict[str, Dict[StatType, Any]]]]:
+#     r"""Given a :class:`Database` object, construct a heterogeneous graph with primary-
+#     foreign key relationships, together with the column stats of each table.
 
-    Returns:
-        HeteroData: The heterogeneous :class:`PyG` object with
-            :class:`TensorFrame` feature.
-    """
-    data = HeteroData()
-    col_stats_dict = dict()
-    if cache_dir is not None:
-        os.makedirs(cache_dir, exist_ok=True)
+#     Args:
+#         db: A database object containing a set of tables.
+#         col_to_stype_dict: Column to stype for
+#             each table.
+#         text_embedder_cfg: Text embedder config.
+#         cache_dir: A directory for storing materialized tensor
+#             frames. If specified, we will either cache the file or use the
+#             cached file. If not specified, we will not use cached file and
+#             re-process everything from scratch without saving the cache.
+
+#     Returns:
+#         HeteroData: The heterogeneous :class:`PyG` object with
+#             :class:`TensorFrame` feature.
+#     """
+#     data = HeteroData()
+#     col_stats_dict = dict()
+#     if cache_dir is not None:
+#         os.makedirs(cache_dir, exist_ok=True)
+
+#     for table_name, table in db.table_dict.items():
+#         # Materialize the tables into tensor frames:
+#         df = table.df
+#         # Ensure that pkey is consecutive.
+#         if table.pkey_col is not None:
+#             assert (df[table.pkey_col].values == np.arange(len(df))).all()
+
+#         col_to_stype = col_to_stype_dict[table_name]
+
+#         # Remove pkey, fkey columns since they will not be used as input
+#         # feature.
+#         remove_pkey_fkey(col_to_stype, table)
+
+#         if len(col_to_stype) == 0:  # Add constant feature in case df is empty:
+#             col_to_stype = {"__const__": stype.numerical}
+#             # We need to add edges later, so we need to also keep the fkeys
+#             fkey_dict = {key: df[key] for key in table.fkey_col_to_pkey_table}
+#             df = pd.DataFrame({"__const__": np.ones(len(table.df)), **fkey_dict})
+
+#         path = (
+#             None if cache_dir is None else os.path.join(cache_dir, f"{table_name}.pt")
+#         )
+
+#         dataset = Dataset(
+#             df=df,
+#             col_to_stype=col_to_stype,
+#             col_to_text_embedder_cfg=text_embedder_cfg,
+#         ).materialize(path=path)
+
+#         data[table_name].tf = dataset.tensor_frame
+#         col_stats_dict[table_name] = dataset.col_stats
+
+#         # Add time attribute:
+#         if table.time_col is not None:
+#             data[table_name].time = torch.from_numpy(
+#                 to_unix_time(table.df[table.time_col])
+#             )
+
+#         # Add edges:
+#         for fkey_name, pkey_table_name in table.fkey_col_to_pkey_table.items():
+#             pkey_index = df[fkey_name]
+#             # Filter out dangling foreign keys
+#             mask = ~pkey_index.isna()
+#             fkey_index = torch.arange(len(pkey_index))
+#             # Filter dangling foreign keys:
+#             pkey_index = torch.from_numpy(pkey_index[mask].astype(int).values)
+#             fkey_index = fkey_index[torch.from_numpy(mask.values)]
+#             # Ensure no dangling fkeys
+#             assert (pkey_index < len(db.table_dict[pkey_table_name])).all()
+
+#             # fkey -> pkey edges
+#             edge_index = torch.stack([fkey_index, pkey_index], dim=0)
+#             edge_type = (table_name, f"f2p_{fkey_name}", pkey_table_name)
+#             data[edge_type].edge_index = sort_edge_index(edge_index)
+
+#             # pkey -> fkey edges.
+#             # "rev_" is added so that PyG loader recognizes the reverse edges
+#             edge_index = torch.stack([pkey_index, fkey_index], dim=0)
+#             edge_type = (pkey_table_name, f"rev_f2p_{fkey_name}", table_name)
+#             data[edge_type].edge_index = sort_edge_index(edge_index)
+
+#     data.validate()
+
+#     return data, col_stats_dict
+
+__all__ = ["make_snapshot_graph"]
+
+def generate_timestamps(main_table, interval_days: int) -> List[pd.Timestamp]:
+    """Generates a list of timestamps based on the first and last date of the main table."""
+    main_df = main_table.df.copy()
+    main_df[main_table.time_col] = pd.to_datetime(main_df[main_table.time_col])
+    
+    first_date = main_df[main_table.time_col].min()
+    last_date = main_df[main_table.time_col].max()
+
+    timestamps = pd.date_range(start=first_date, end=last_date, freq=f"{interval_days}D").to_list()
+    
+    if not timestamps:
+        print("⚠️ Warning: No valid timestamps found!")
+    
+    return timestamps
+
+def process_main_tables(db, col_to_stype_dict, snapshot, ts, text_embedder_cfg):
+    """Processes main tables by filtering data up to the given timestamp."""
+    col_stats_dict = {}
+    
+    for table_name, table in db.table_dict.items():
+        if table.time_col is None or table.time_col not in table.df.columns:
+            continue  # Skip tables without a time column
+
+        df = table.df[pd.to_datetime(table.df[table.time_col]) <= ts]  # Filter by time
+        if df.empty:
+            continue  # Skip if no data available
+        
+        col_to_stype = col_to_stype_dict[table_name]
+        
+        col_to_stype_copy = col_to_stype.copy()
+        remove_pkey_fkey(col_to_stype_copy, table)  # Work on the copy, not the original
+
+        dataset = Dataset(
+            df=df,
+            col_to_stype=col_to_stype,
+            col_to_text_embedder_cfg=text_embedder_cfg,  # ✅ Added text embedder
+        ).materialize()
+
+        snapshot[table_name].tf = dataset.tensor_frame
+        col_stats_dict[table_name] = dataset.col_stats
+
+        # Add time attribute
+        snapshot[table_name].time = torch.from_numpy(to_unix_time(df[table.time_col]))
+
+    return col_stats_dict
+
+
+def process_related_tables(db, col_to_stype_dict, snapshot, text_embedder_cfg):
+    """Processes related tables by including only referenced entities in the snapshot."""
+    col_stats_dict = {}
+
+    print("\n=== Processing Related Tables ===")  # ✅ High-level debug message
 
     for table_name, table in db.table_dict.items():
-        # Materialize the tables into tensor frames:
-        df = table.df
-        # Ensure that pkey is consecutive.
-        if table.pkey_col is not None:
-            assert (df[table.pkey_col].values == np.arange(len(df))).all()
+        if table_name in snapshot:  # ✅ Skip tables already processed
+            continue
 
+        df = table.df.copy()
+        initial_row_count = len(df)
+
+        print(f"\n🔍 Checking table: {table_name}")
+        print(f"   ➝ Initial row count: {initial_row_count}")
+        print(f"   ➝ Foreign keys: {table.fkey_col_to_pkey_table}")
+
+        referenced = False  # ✅ Track if any row is referenced
+        valid_rows = []
+
+        for fkey_name, pkey_table_name in table.fkey_col_to_pkey_table.items():
+            if pkey_table_name in snapshot and fkey_name in df.columns:
+                main_df = snapshot[pkey_table_name].tf.to_pandas()  # Convert main table snapshot to Pandas
+                
+                print(f"   🔗 Checking FK '{fkey_name}' → PK '{pkey_table_name}'")
+                print(f"      ➝ FK unique values: {df[fkey_name].nunique()}")
+                print(f"      ➝ PK unique values in snapshot: {main_df[pkey_table_name].nunique()}")
+
+                before_filter = len(df)
+                df = df[df[fkey_name].isin(main_df[pkey_table_name])]
+                after_filter = len(df)
+
+                if after_filter > 0:
+                    referenced = True
+                    valid_rows.append(True)
+
+                print(f"      ✅ Matched rows: {before_filter} → {after_filter}")
+
+        if not referenced:
+            print(f"⚠️ Skipping {table_name}, no valid FK references found in this snapshot.")
+            continue  # ✅ Skip if no referenced rows
+
+        print(f"✅ Adding '{table_name}' to snapshot with {len(df)} rows.")
+
+        # ✅ Add only referenced rows to the snapshot
         col_to_stype = col_to_stype_dict[table_name]
-
-        # Remove pkey, fkey columns since they will not be used as input
-        # feature.
-        remove_pkey_fkey(col_to_stype, table)
-
-        if len(col_to_stype) == 0:  # Add constant feature in case df is empty:
-            col_to_stype = {"__const__": stype.numerical}
-            # We need to add edges later, so we need to also keep the fkeys
-            fkey_dict = {key: df[key] for key in table.fkey_col_to_pkey_table}
-            df = pd.DataFrame({"__const__": np.ones(len(table.df)), **fkey_dict})
-
-        path = (
-            None if cache_dir is None else os.path.join(cache_dir, f"{table_name}.pt")
-        )
+        col_to_stype_copy = col_to_stype.copy()
+        remove_pkey_fkey(col_to_stype_copy, table)  # ✅ Work on the copy
 
         dataset = Dataset(
             df=df,
             col_to_stype=col_to_stype,
             col_to_text_embedder_cfg=text_embedder_cfg,
-        ).materialize(path=path)
+        ).materialize()
 
-        data[table_name].tf = dataset.tensor_frame
+        snapshot[table_name].tf = dataset.tensor_frame
         col_stats_dict[table_name] = dataset.col_stats
 
-        # Add time attribute:
-        if table.time_col is not None:
-            data[table_name].time = torch.from_numpy(
-                to_unix_time(table.df[table.time_col])
-            )
+    print("\n=== Finished Processing Related Tables ===\n")
+    return col_stats_dict
 
-        # Add edges:
+
+
+def add_edges(db, snapshot) -> bool:
+    """Adds edges to the snapshot ensuring FK relationships are consistent."""
+    has_edges = False  # Track whether this snapshot contains edges
+
+    for table_name, table in db.table_dict.items():
+        df = table.df  # Get dataframe for the current table
+        
         for fkey_name, pkey_table_name in table.fkey_col_to_pkey_table.items():
-            pkey_index = df[fkey_name]
-            # Filter out dangling foreign keys
-            mask = ~pkey_index.isna()
-            fkey_index = torch.arange(len(pkey_index))
-            # Filter dangling foreign keys:
-            pkey_index = torch.from_numpy(pkey_index[mask].astype(int).values)
-            fkey_index = fkey_index[torch.from_numpy(mask.values)]
-            # Ensure no dangling fkeys
-            assert (pkey_index < len(db.table_dict[pkey_table_name])).all()
+            if fkey_name not in df.columns or pkey_table_name not in snapshot.node_types:
+                continue  # Skip if FK column or referenced table is missing
 
-            # fkey -> pkey edges
+            # Retrieve primary key column name from database schema
+            pkey_column = db.table_dict[pkey_table_name].pkey_col
+            if not pkey_column:
+                print(f"⚠️ No primary key defined for {pkey_table_name}. Skipping edge creation.")
+                continue  # Skip this FK relationship if PK is not well-defined
+
+            # Extract primary key values from snapshot TensorFrame
+            pkey_tensor_frame = snapshot[pkey_table_name].tf  
+
+            # 🔥 Fix: Flatten col_names_dict values into a single list of actual column names
+            all_columns = sum(pkey_tensor_frame.col_names_dict.values(), [])
+
+            if pkey_column not in all_columns:
+                print(f"⚠️ Primary key column '{pkey_column}' not found in {pkey_table_name}. Skipping edge.")
+                continue  # Avoid indexing errors
+
+            # Get stype key and index
+            for stype_key, col_list in pkey_tensor_frame.col_names_dict.items():
+                if pkey_column in col_list:
+                    stype_idx = col_list.index(pkey_column)
+                    break
+            else:
+                print(f"⚠️ Could not find stype key for '{pkey_column}'. Skipping edge.")
+                continue
+
+            # ✅ Correct way to get PK values
+            valid_pkeys = pkey_tensor_frame.feat_dict[stype_key][:, stype_idx].numpy()  # Convert tensor to NumPy array
+
+            # Filter FK values to only those that exist in the snapshot
+            df_filtered = df[df[fkey_name].isin(valid_pkeys)]
+            
+            if df_filtered.empty:
+                continue  # Skip if no valid FK references
+
+            fkey_index = torch.arange(len(df_filtered), dtype=torch.long)
+            pkey_index = torch.tensor(df_filtered[fkey_name].values, dtype=torch.long)
+
             edge_index = torch.stack([fkey_index, pkey_index], dim=0)
             edge_type = (table_name, f"f2p_{fkey_name}", pkey_table_name)
-            data[edge_type].edge_index = sort_edge_index(edge_index)
 
-            # pkey -> fkey edges.
-            # "rev_" is added so that PyG loader recognizes the reverse edges
-            edge_index = torch.stack([pkey_index, fkey_index], dim=0)
-            edge_type = (pkey_table_name, f"rev_f2p_{fkey_name}", table_name)
-            data[edge_type].edge_index = sort_edge_index(edge_index)
+            snapshot[edge_type].edge_index = sort_edge_index(edge_index)
+            has_edges = True  # Mark that edges exist
 
-    data.validate()
+    return has_edges
 
-    return data, col_stats_dict
 
+def make_snapshot_graph(
+    db: Database,
+    col_to_stype_dict: Dict[str, Dict[str, stype]],
+    main_table_name: str,
+    interval_days: int,
+    text_embedder_cfg: Optional[TextEmbedderConfig] = None,
+    cache_dir: Optional[str] = None,
+) -> Tuple[List[HeteroData], Dict[str, Dict[str, Dict[str, Any]]]]:
+    """Construct a sequence of graph snapshots at fixed timestamps using a main table 
+       and a defined interval in days for snapshot creation."""
+
+    data_snapshots = []
+    col_stats_dict = dict()
+
+    # Validate main table
+    if main_table_name not in db.table_dict:
+        raise ValueError(f"Main table {main_table_name} not found in database.")
+
+    main_table = db.table_dict[main_table_name]
+    if main_table.time_col is None or main_table.time_col not in main_table.df.columns:
+        raise ValueError(f"Main table {main_table_name} must have a valid timestamp column.")
+
+    # Generate timestamps based on the main table
+    timestamps = generate_timestamps(main_table, interval_days)
+
+    if not timestamps:
+        return [], {}  # No valid timestamps, return empty
+
+    # Create snapshots at defined timestamps
+    for ts in timestamps:
+        snapshot = HeteroData()
+
+        # Process main tables (filter by timestamp)
+        main_col_stats = process_main_tables(db, col_to_stype_dict, snapshot, ts, text_embedder_cfg)
+        col_stats_dict.update(main_col_stats)
+
+        # Process related FK tables
+        related_col_stats = process_related_tables(db, col_to_stype_dict, snapshot, text_embedder_cfg)
+        col_stats_dict.update(related_col_stats)
+
+        # Add edges ensuring FK relationships are consistent with the snapshot
+        has_edges = add_edges(db, snapshot)
+
+        # Ensure snapshot contains at least one edge
+        if not has_edges:
+            print(f"⚠️ Warning: Snapshot at timestamp {ts} has no edges. Skipping it.")
+            continue  # Skip this snapshot if no edges exist
+
+        snapshot.validate()
+        data_snapshots.append(snapshot)
+
+    return data_snapshots, col_stats_dict
 
 class AttachTargetTransform:
     r"""Attach the target label to the heterogeneous mini-batch.

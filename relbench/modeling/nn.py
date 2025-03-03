@@ -2,11 +2,13 @@ from typing import Any, Dict, List, Optional
 
 import torch
 import torch_frame
+import torch.nn as nn
 from torch import Tensor
 from torch_frame.data.stats import StatType
 from torch_frame.nn.models import ResNet
 from torch_geometric.nn import HeteroConv, LayerNorm, PositionalEncoding, SAGEConv
 from torch_geometric.typing import EdgeType, NodeType
+from torch_geometric.data import HeteroData
 
 
 class HeteroEncoder(torch.nn.Module):
@@ -112,15 +114,17 @@ class HeteroTemporalEncoder(torch.nn.Module):
         out_dict: Dict[NodeType, Tensor] = {}
 
         for node_type, time in time_dict.items():
-            rel_time = seed_time[batch_dict[node_type]] - time
+            if node_type in batch_dict and batch_dict[node_type].numel() > 0:
+                rel_time = seed_time[batch_dict[node_type]] - time
+            else:
+                rel_time = torch.zeros_like(time)  # Default to zeros if missing
+            
             rel_time = rel_time / (60 * 60 * 24)  # Convert seconds to days.
-
             x = self.encoder_dict[node_type](rel_time)
             x = self.lin_dict[node_type](x)
             out_dict[node_type] = x
 
         return out_dict
-
 
 class HeteroGraphSAGE(torch.nn.Module):
     def __init__(
@@ -161,13 +165,53 @@ class HeteroGraphSAGE(torch.nn.Module):
     def forward(
         self,
         x_dict: Dict[NodeType, Tensor],
-        edge_index_dict: Dict[NodeType, Tensor],
-        num_sampled_nodes_dict: Optional[Dict[NodeType, List[int]]] = None,
-        num_sampled_edges_dict: Optional[Dict[EdgeType, List[int]]] = None,
+        edge_index_dict: Dict[EdgeType, Tensor],
     ) -> Dict[NodeType, Tensor]:
-        for _, (conv, norm_dict) in enumerate(zip(self.convs, self.norms)):
+        # Ensure every node type referenced in edge_index_dict has embeddings in x_dict
+        embedding_dim = next((v.shape[-1] for v in x_dict.values() if v is not None and v.numel() > 0), 128)
+
+        missing_nodes = set()
+        for src_node, _, dst_node in edge_index_dict.keys():
+            for node in [src_node, dst_node]:  # ✅ Check both source & destination nodes
+                if node not in x_dict or x_dict[node] is None or x_dict[node].numel() == 0:
+                    missing_nodes.add(node)
+
+        if missing_nodes:
+            print(f"🚨 Missing node embeddings for: {missing_nodes}. Adding zero tensors.")
+            for node in missing_nodes:
+                x_dict[node] = torch.zeros((1, embedding_dim), device=next(iter(x_dict.values())).device)
+
+        # Ensure edge_index_dict is valid before passing to GNN
+        edge_index_dict = {key: val for key, val in edge_index_dict.items() if val is not None and val.numel() > 0}
+        if not edge_index_dict:
+            print("⚠️ Warning: `edge_index_dict` is empty, skipping message passing.")
+            return x_dict  # Skip GNN if no edges
+
+        # Message Passing
+        for conv, norm_dict in zip(self.convs, self.norms):
             x_dict = conv(x_dict, edge_index_dict)
             x_dict = {key: norm_dict[key](x) for key, x in x_dict.items()}
             x_dict = {key: x.relu() for key, x in x_dict.items()}
 
         return x_dict
+
+
+class SnapshotTemporalGNN(nn.Module):
+    
+    def __init__(self, node_types, edge_types, input_dim, hidden_dim, num_layers):
+        super(SnapshotTemporalGNN, self).__init__()
+        self.gnn = HeteroGraphSAGE(node_types, edge_types, hidden_dim)
+        self.lstm = nn.LSTM(hidden_dim, hidden_dim, num_layers=num_layers, batch_first=True)
+
+
+    def forward(self, snapshots: List[HeteroData]):
+        """Process a sequence of snapshots."""
+        x_list = []
+        for snapshot in snapshots:
+            x_dict = self.gnn(snapshot.x_dict, snapshot.edge_index_dict)
+            x_list.append(torch.cat([x for x in x_dict.values()], dim=0))  # Flatten node features
+
+        x_seq = torch.stack(x_list, dim=1)  # Shape: (num_nodes, sequence_length, hidden_dim)
+        output, _ = self.lstm(x_seq)
+        return output[:, -1, :]  # Return the last time step output
+    

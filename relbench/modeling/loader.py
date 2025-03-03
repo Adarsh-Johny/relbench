@@ -83,44 +83,81 @@ class CustomNodeLoader(NodeLoader):
         out = self.filter_fn(out)
         return out
 
-
-class TimestampSampler(Sampler[int]):
-    r"""A TimestampSampler that samples rows from the same timestamp."""
-
-    def __init__(
-        self,
-        timestamp: Tensor,
-        batch_size: int,
-    ):
+class SnapshotSampler(Sampler[int]):
+    """A sampler that selects entire graph snapshots instead of events."""
+    def __init__(self, timestamps: List[int], batch_size: int):
         super().__init__()
         self.batch_size = batch_size
-        self.time_dict = {
-            int(time): (timestamp == time).nonzero().view(-1)
-            for time in timestamp.unique()
-        }
-        self.num_batches = sum(
-            [indices.numel() // batch_size for indices in self.time_dict.values()]
-        )
+        self.timestamps = timestamps
+        self.num_batches = len(timestamps) // batch_size
 
     def __iter__(self) -> Iterator[List[int]]:
-        all_batches = []
-        for indices in self.time_dict.values():
-            # Random shuffle values:
-            indices = indices[torch.randperm(indices.numel())]
-            batches = torch.split(indices, self.batch_size)
-            for batch in batches:
-                if len(batch) < self.batch_size:
-                    continue
-                else:
-                    all_batches.append(batch.tolist())
-
+        all_batches = [
+            self.timestamps[i : i + self.batch_size]
+            for i in range(0, len(self.timestamps), self.batch_size)
+        ]
         random.shuffle(all_batches)
-
         for batch in all_batches:
             yield batch
 
     def __len__(self) -> int:
         return self.num_batches
+
+class SnapshotDataset(Dataset):
+    def __init__(self, snapshots):
+        self.snapshots = snapshots
+
+    def __len__(self):
+        return len(self.snapshots)
+
+    def __getitem__(self, idx):
+        return self.snapshots[idx]
+
+class SnapshotLoader(DataLoader):
+    """Loads graph snapshots instead of events."""
+    def __init__(self, snapshots: List[HeteroData], batch_size: int, **kwargs):
+        dataset = SnapshotDataset(snapshots)
+        self.sampler = SnapshotSampler(range(len(snapshots)), batch_size)
+        super().__init__(dataset, sampler=self.sampler, **kwargs)
+
+
+# class TimestampSampler(Sampler[int]):
+#     r"""A TimestampSampler that samples rows from the same timestamp."""
+
+#     def __init__(
+#         self,
+#         timestamp: Tensor,
+#         batch_size: int,
+#     ):
+#         super().__init__()
+#         self.batch_size = batch_size
+#         self.time_dict = {
+#             int(time): (timestamp == time).nonzero().view(-1)
+#             for time in timestamp.unique()
+#         }
+#         self.num_batches = sum(
+#             [indices.numel() // batch_size for indices in self.time_dict.values()]
+#         )
+
+#     def __iter__(self) -> Iterator[List[int]]:
+#         all_batches = []
+#         for indices in self.time_dict.values():
+#             # Random shuffle values:
+#             indices = indices[torch.randperm(indices.numel())]
+#             batches = torch.split(indices, self.batch_size)
+#             for batch in batches:
+#                 if len(batch) < self.batch_size:
+#                     continue
+#                 else:
+#                     all_batches.append(batch.tolist())
+
+#         random.shuffle(all_batches)
+
+#         for batch in all_batches:
+#             yield batch
+
+#     def __len__(self) -> int:
+#         return self.num_batches
 
 
 class CustomLinkDataset(Dataset):
@@ -216,13 +253,13 @@ class LinkNeighborLoader(DataLoader):
 
         kwargs.pop("dataset", None)
         kwargs.pop("collate_fn", None)
-        if share_same_time:
-            kwargs.pop("sampler", None)
-            kwargs["batch_sampler"] = TimestampSampler(
-                src_time,
-                kwargs["batch_size"],
-            )
-            kwargs.pop("batch_size", None)
+        # if share_same_time:
+        #     kwargs.pop("sampler", None)
+        #     kwargs["batch_sampler"] = TimestampSampler(
+        #         src_time,
+        #         kwargs["batch_size"],
+        #     )
+        #     kwargs.pop("batch_size", None)
 
         dataset = CustomLinkDataset(
             self.src_nodes[1],
