@@ -1,3 +1,4 @@
+from datetime import datetime
 import os
 from typing import Any, Dict, NamedTuple, Optional, Tuple
 
@@ -160,15 +161,35 @@ def process_main_tables(db, col_to_stype_dict, snapshot, ts, text_embedder_cfg):
 
     return col_stats_dict
 
+def safe_convert_timestamp(ts_array):
+    """Safely converts timestamp arrays to datetime, avoiding invalid dates."""
+    valid_dates = []
+    for ts in ts_array:
+        try:
+            valid_dates.append(datetime(*map(int, ts[:6])))
+        except ValueError as e:
+            print(f"⚠️ Warning: Skipping invalid date {ts[:6]} -> {e}")
+            valid_dates.append(None)  # Mark as None for now
+    return valid_dates
 
 def process_related_tables(db, col_to_stype_dict, snapshot, text_embedder_cfg):
-    """Processes related tables by including only referenced entities in the snapshot."""
+    """Processes related tables by including only referenced entities in the snapshot.
+    
+    Ensures tables are added even if they don’t have FK relationships but their PK is referenced elsewhere.
+    """
     col_stats_dict = {}
 
-    print("\n=== Processing Related Tables ===")  # ✅ High-level debug message
+    print("\n=== Processing Related Tables ===")  
+
+    referenced_tables = set()  
 
     for table_name, table in db.table_dict.items():
-        if table_name in snapshot:  # ✅ Skip tables already processed
+        for fkey_name, pkey_table_name in table.fkey_col_to_pkey_table.items():
+            if pkey_table_name in snapshot.to_dict():
+                referenced_tables.add(pkey_table_name)  
+
+    for table_name, table in db.table_dict.items():
+        if table_name in snapshot.to_dict():
             continue
 
         df = table.df.copy()
@@ -178,37 +199,104 @@ def process_related_tables(db, col_to_stype_dict, snapshot, text_embedder_cfg):
         print(f"   ➝ Initial row count: {initial_row_count}")
         print(f"   ➝ Foreign keys: {table.fkey_col_to_pkey_table}")
 
-        referenced = False  # ✅ Track if any row is referenced
-        valid_rows = []
+        referenced = False  
 
+        # ✅ Step 1: Check FK → PK relationships
         for fkey_name, pkey_table_name in table.fkey_col_to_pkey_table.items():
-            if pkey_table_name in snapshot and fkey_name in df.columns:
-                main_df = snapshot[pkey_table_name].tf.to_pandas()  # Convert main table snapshot to Pandas
-                
-                print(f"   🔗 Checking FK '{fkey_name}' → PK '{pkey_table_name}'")
-                print(f"      ➝ FK unique values: {df[fkey_name].nunique()}")
-                print(f"      ➝ PK unique values in snapshot: {main_df[pkey_table_name].nunique()}")
+            if pkey_table_name in snapshot.to_dict() and fkey_name in df.columns:
+                tf = snapshot[pkey_table_name].tf
+                feat_dict = tf.feat_dict  
 
+                # Extract numerical features
+                num_data = {
+                    col: feat_dict[stype.numerical][:, i].cpu().numpy() 
+                    for i, col in enumerate(tf.col_names_dict.get(stype.numerical, []))
+                }
+
+                # Extract categorical features
+                cat_data = {
+                    col: feat_dict[stype.categorical][:, i].cpu().numpy() 
+                    for i, col in enumerate(tf.col_names_dict.get(stype.categorical, []))
+                }
+
+                # Extract timestamp features
+                if stype.timestamp in feat_dict:
+                    timestamp_tensor = feat_dict[stype.timestamp].cpu().numpy()
+                    time_cols = tf.col_names_dict.get(stype.timestamp, [])
+                    
+                    time_data = {
+                        col: safe_convert_timestamp(timestamp_tensor[:, i, :])
+                        for i, col in enumerate(time_cols)
+                    }
+                else:
+                    time_data = {}
+
+                # Extract embeddings
+                if stype.embedding in feat_dict:
+                    embedding_tensor = feat_dict[stype.embedding].values  
+                    embedding_dim = embedding_tensor.shape[1]  
+
+                    embedding_data = {
+                        f"embedding_{i}": embedding_tensor[:, i].cpu().numpy()
+                        for i in range(embedding_dim)
+                    }
+                else:
+                    embedding_data = {}
+
+                # Convert to Pandas DataFrame
+                main_df = pd.DataFrame({**num_data, **cat_data, **time_data, **embedding_data})
+                print(f"✅ Converted `{pkey_table_name}` TensorFrame to Pandas DataFrame")
+
+                # ✅ Get correct primary key column
+                pkey_column = db.table_dict[pkey_table_name].pkey_col
+                if pkey_column not in main_df.columns:
+                    raise KeyError(f"Primary key column '{pkey_column}' not found in `{pkey_table_name}` DataFrame")
+
+                # ✅ Filter by correct primary key
                 before_filter = len(df)
-                df = df[df[fkey_name].isin(main_df[pkey_table_name])]
+                df = df[df[fkey_name].isin(main_df[pkey_column])]
                 after_filter = len(df)
 
                 if after_filter > 0:
                     referenced = True
-                    valid_rows.append(True)
-
                 print(f"      ✅ Matched rows: {before_filter} → {after_filter}")
 
+        # ✅ Step 2: Check if PK of this table is referenced elsewhere (indirect links)
         if not referenced:
-            print(f"⚠️ Skipping {table_name}, no valid FK references found in this snapshot.")
-            continue  # ✅ Skip if no referenced rows
+            for other_table_name, other_table in db.table_dict.items():
+                if other_table_name in snapshot.to_dict():
+                    for other_fkey, other_pkey in other_table.fkey_col_to_pkey_table.items():
+                        tf = snapshot[other_table_name].tf
+                        feat_dict = tf.feat_dict  
 
-        print(f"✅ Adding '{table_name}' to snapshot with {len(df)} rows.")
+                        # Convert TensorFrame to DataFrame
+                        num_data = {
+                            col: feat_dict[stype.numerical][:, i].cpu().numpy() 
+                            for i, col in enumerate(tf.col_names_dict.get(stype.numerical, []))
+                        }
+                        cat_data = {
+                            col: feat_dict[stype.categorical][:, i].cpu().numpy() 
+                            for i, col in enumerate(tf.col_names_dict.get(stype.categorical, []))
+                        }
 
-        # ✅ Add only referenced rows to the snapshot
+                        ref_df = pd.DataFrame({**num_data, **cat_data})
+
+                        if other_pkey == table_name and other_fkey in ref_df.columns:
+                            referenced = True
+                            print(f"   ✅ `{table_name}` is referenced as a PK in `{other_table_name}`")
+                            break
+                if referenced:
+                    break  
+
+        if not referenced:
+            print(f"⚠️ Skipping `{table_name}`, no valid references found in this snapshot.")
+            continue  
+
+        print(f"✅ Adding `{table_name}` to snapshot with {len(df)} rows.")
+
         col_to_stype = col_to_stype_dict[table_name]
         col_to_stype_copy = col_to_stype.copy()
-        remove_pkey_fkey(col_to_stype_copy, table)  # ✅ Work on the copy
+        remove_pkey_fkey(col_to_stype_copy, table)  
 
         dataset = Dataset(
             df=df,
@@ -222,36 +310,33 @@ def process_related_tables(db, col_to_stype_dict, snapshot, text_embedder_cfg):
     print("\n=== Finished Processing Related Tables ===\n")
     return col_stats_dict
 
-
-
-def add_edges(db, snapshot) -> bool:
-    """Adds edges to the snapshot ensuring FK relationships are consistent."""
-    has_edges = False  # Track whether this snapshot contains edges
-
+def add_edges(db, snapshot, ts) -> bool:
+    has_edges = False
     for table_name, table in db.table_dict.items():
-        df = table.df  # Get dataframe for the current table
-        
-        for fkey_name, pkey_table_name in table.fkey_col_to_pkey_table.items():
-            if fkey_name not in df.columns or pkey_table_name not in snapshot.node_types:
-                continue  # Skip if FK column or referenced table is missing
+        # Only proceed if the table (as a node) exists in the snapshot.
+        if table_name not in snapshot.node_types:
+            continue
 
-            # Retrieve primary key column name from database schema
+        df = table.df
+        for fkey_name, pkey_table_name in table.fkey_col_to_pkey_table.items():
+            # Only add edges if both the current table and the referenced table exist in the snapshot.
+            if table_name not in snapshot.node_types or pkey_table_name not in snapshot.node_types:
+                continue
+            if fkey_name not in df.columns:
+                continue
+
             pkey_column = db.table_dict[pkey_table_name].pkey_col
             if not pkey_column:
                 print(f"⚠️ No primary key defined for {pkey_table_name}. Skipping edge creation.")
-                continue  # Skip this FK relationship if PK is not well-defined
+                continue
 
-            # Extract primary key values from snapshot TensorFrame
-            pkey_tensor_frame = snapshot[pkey_table_name].tf  
-
-            # 🔥 Fix: Flatten col_names_dict values into a single list of actual column names
+            # Extract primary key values from the snapshot.
+            pkey_tensor_frame = snapshot[pkey_table_name].tf
             all_columns = sum(pkey_tensor_frame.col_names_dict.values(), [])
-
             if pkey_column not in all_columns:
                 print(f"⚠️ Primary key column '{pkey_column}' not found in {pkey_table_name}. Skipping edge.")
-                continue  # Avoid indexing errors
+                continue
 
-            # Get stype key and index
             for stype_key, col_list in pkey_tensor_frame.col_names_dict.items():
                 if pkey_column in col_list:
                     stype_idx = col_list.index(pkey_column)
@@ -260,25 +345,52 @@ def add_edges(db, snapshot) -> bool:
                 print(f"⚠️ Could not find stype key for '{pkey_column}'. Skipping edge.")
                 continue
 
-            # ✅ Correct way to get PK values
-            valid_pkeys = pkey_tensor_frame.feat_dict[stype_key][:, stype_idx].numpy()  # Convert tensor to NumPy array
-
-            # Filter FK values to only those that exist in the snapshot
+            valid_pkeys = pkey_tensor_frame.feat_dict[stype_key][:, stype_idx].numpy()
             df_filtered = df[df[fkey_name].isin(valid_pkeys)]
-            
             if df_filtered.empty:
-                continue  # Skip if no valid FK references
+                continue
 
             fkey_index = torch.arange(len(df_filtered), dtype=torch.long)
             pkey_index = torch.tensor(df_filtered[fkey_name].values, dtype=torch.long)
-
             edge_index = torch.stack([fkey_index, pkey_index], dim=0)
             edge_type = (table_name, f"f2p_{fkey_name}", pkey_table_name)
-
             snapshot[edge_type].edge_index = sort_edge_index(edge_index)
-            has_edges = True  # Mark that edges exist
+
+            ts_numeric = ts.timestamp()
+            snapshot[edge_type].edge_time = torch.full((edge_index.size(1),), ts_numeric, dtype=torch.float32)
+            has_edges = True
 
     return has_edges
+
+
+def ensure_nodes_from_edges(snapshot: HeteroData, feature_dim=128):
+    """
+    Ensure that every node referenced in edges has a valid feature matrix 'x'
+    of shape (num_nodes, feature_dim). If not, create or extend it with zeros.
+    """
+    for edge_type in snapshot.edge_types:
+        src_type, _, dst_type = edge_type
+        edge_index = snapshot[edge_type].edge_index
+
+        for node_type, nodes in [(src_type, edge_index[0]), (dst_type, edge_index[1])]:
+            # If the node type doesn't exist, initialize it.
+            if node_type not in snapshot.node_types:
+                snapshot[node_type] = HeteroData()
+                snapshot[node_type].num_nodes = 0
+
+            current_num_nodes = getattr(snapshot[node_type], 'num_nodes', 0)
+            max_index = nodes.max().item() if nodes.numel() > 0 else -1
+            if max_index >= current_num_nodes:
+                snapshot[node_type].num_nodes = max_index + 1
+
+            # Ensure there is a feature matrix 'x'
+            if not hasattr(snapshot[node_type], 'x'):
+                snapshot[node_type].x = torch.zeros((snapshot[node_type].num_nodes, feature_dim))
+            else:
+                x = snapshot[node_type].x
+                if x.size(0) < snapshot[node_type].num_nodes:
+                    additional = torch.zeros((snapshot[node_type].num_nodes - x.size(0), x.size(1)), device=x.device)
+                    snapshot[node_type].x = torch.cat([x, additional], dim=0)
 
 
 def make_snapshot_graph(
@@ -322,8 +434,12 @@ def make_snapshot_graph(
         col_stats_dict.update(related_col_stats)
 
         # Add edges ensuring FK relationships are consistent with the snapshot
-        has_edges = add_edges(db, snapshot)
-
+        has_edges = add_edges(db, snapshot, ts)
+        
+        # Ensure all nodes from edges are present
+        ensure_nodes_from_edges(snapshot)
+        
+        
         # Ensure snapshot contains at least one edge
         if not has_edges:
             print(f"⚠️ Warning: Snapshot at timestamp {ts} has no edges. Skipping it.")
@@ -333,7 +449,7 @@ def make_snapshot_graph(
         data_snapshots.append(snapshot)
 
     return data_snapshots, col_stats_dict
-
+    
 class AttachTargetTransform:
     r"""Attach the target label to the heterogeneous mini-batch.
 
