@@ -19,7 +19,6 @@ from relbench.modeling.utils import remove_pkey_fkey, to_unix_time
 from typing import Any, Dict, List, Optional, Tuple
 
 
-
 # def make_pkey_fkey_graph(
 #     db: Database,
 #     col_to_stype_dict: Dict[str, Dict[str, stype]],
@@ -126,7 +125,7 @@ def generate_timestamps(main_table, interval_days: int) -> List[pd.Timestamp]:
     timestamps = pd.date_range(start=first_date, end=last_date, freq=f"{interval_days}D").to_list()
     
     if not timestamps:
-        print("⚠️ Warning: No valid timestamps found!")
+        print("No valid timestamps found!")
     
     return timestamps
 
@@ -150,7 +149,7 @@ def process_main_tables(db, col_to_stype_dict, snapshot, ts, text_embedder_cfg):
         dataset = Dataset(
             df=df,
             col_to_stype=col_to_stype,
-            col_to_text_embedder_cfg=text_embedder_cfg,  # ✅ Added text embedder
+            col_to_text_embedder_cfg=text_embedder_cfg,  # Added text embedder
         ).materialize()
 
         snapshot[table_name].tf = dataset.tensor_frame
@@ -168,14 +167,14 @@ def safe_convert_timestamp(ts_array):
         try:
             valid_dates.append(datetime(*map(int, ts[:6])))
         except ValueError as e:
-            print(f"⚠️ Warning: Skipping invalid date {ts[:6]} -> {e}")
+            print(f"Skipping invalid date {ts[:6]} -> {e}")
             valid_dates.append(None)  # Mark as None for now
     return valid_dates
 
 def process_related_tables(db, col_to_stype_dict, snapshot, text_embedder_cfg):
     """Processes related tables by including only referenced entities in the snapshot.
     
-    Ensures tables are added even if they don’t have FK relationships but their PK is referenced elsewhere.
+    Ensures tables are added even if they don’t have FK relationships -- but their PK is referenced elsewhere.
     """
     col_stats_dict = {}
 
@@ -195,13 +194,13 @@ def process_related_tables(db, col_to_stype_dict, snapshot, text_embedder_cfg):
         df = table.df.copy()
         initial_row_count = len(df)
 
-        print(f"\n🔍 Checking table: {table_name}")
-        print(f"   ➝ Initial row count: {initial_row_count}")
-        print(f"   ➝ Foreign keys: {table.fkey_col_to_pkey_table}")
+        print(f"\n Checking table: {table_name}")
+        print(f"   -> Initial row count: {initial_row_count}")
+        print(f"  -> Foreign keys: {table.fkey_col_to_pkey_table}")
 
         referenced = False  
 
-        # ✅ Step 1: Check FK → PK relationships
+        # Step 1: Check FK → PK relationships
         for fkey_name, pkey_table_name in table.fkey_col_to_pkey_table.items():
             if pkey_table_name in snapshot.to_dict() and fkey_name in df.columns:
                 tf = snapshot[pkey_table_name].tf
@@ -245,23 +244,23 @@ def process_related_tables(db, col_to_stype_dict, snapshot, text_embedder_cfg):
 
                 # Convert to Pandas DataFrame
                 main_df = pd.DataFrame({**num_data, **cat_data, **time_data, **embedding_data})
-                print(f"✅ Converted `{pkey_table_name}` TensorFrame to Pandas DataFrame")
+                print(f"Converted `{pkey_table_name}` TensorFrame to Pandas DataFrame")
 
-                # ✅ Get correct primary key column
+                # Get correct primary key column
                 pkey_column = db.table_dict[pkey_table_name].pkey_col
                 if pkey_column not in main_df.columns:
                     raise KeyError(f"Primary key column '{pkey_column}' not found in `{pkey_table_name}` DataFrame")
 
-                # ✅ Filter by correct primary key
+                # Filter by correct primary key
                 before_filter = len(df)
                 df = df[df[fkey_name].isin(main_df[pkey_column])]
                 after_filter = len(df)
 
                 if after_filter > 0:
                     referenced = True
-                print(f"      ✅ Matched rows: {before_filter} → {after_filter}")
+                print(f"   Matched rows: {before_filter} → {after_filter}")
 
-        # ✅ Step 2: Check if PK of this table is referenced elsewhere (indirect links)
+        # Step 2: Check if PK of this table is referenced elsewhere (indirect links)
         if not referenced:
             for other_table_name, other_table in db.table_dict.items():
                 if other_table_name in snapshot.to_dict():
@@ -283,16 +282,16 @@ def process_related_tables(db, col_to_stype_dict, snapshot, text_embedder_cfg):
 
                         if other_pkey == table_name and other_fkey in ref_df.columns:
                             referenced = True
-                            print(f"   ✅ `{table_name}` is referenced as a PK in `{other_table_name}`")
+                            print(f" `{table_name}` is referenced as a PK in `{other_table_name}`")
                             break
                 if referenced:
                     break  
 
         if not referenced:
-            print(f"⚠️ Skipping `{table_name}`, no valid references found in this snapshot.")
+            print(f"Skipping `{table_name}`, no valid references found in this snapshot.!!! ")
             continue  
 
-        print(f"✅ Adding `{table_name}` to snapshot with {len(df)} rows.")
+        print(f" Adding `{table_name}` to snapshot with {len(df)} rows.")
 
         col_to_stype = col_to_stype_dict[table_name]
         col_to_stype_copy = col_to_stype.copy()
@@ -334,7 +333,7 @@ def add_edges(db, snapshot, ts) -> bool:
             pkey_tensor_frame = snapshot[pkey_table_name].tf
             all_columns = sum(pkey_tensor_frame.col_names_dict.values(), [])
             if pkey_column not in all_columns:
-                print(f"⚠️ Primary key column '{pkey_column}' not found in {pkey_table_name}. Skipping edge.")
+                print(f"Primary key column '{pkey_column}' not found in {pkey_table_name}. Skipping edge.")
                 continue
 
             for stype_key, col_list in pkey_tensor_frame.col_names_dict.items():
@@ -342,7 +341,7 @@ def add_edges(db, snapshot, ts) -> bool:
                     stype_idx = col_list.index(pkey_column)
                     break
             else:
-                print(f"⚠️ Could not find stype key for '{pkey_column}'. Skipping edge.")
+                print(f"Could not find stype key for '{pkey_column}'. Skipping edge.")
                 continue
 
             valid_pkeys = pkey_tensor_frame.feat_dict[stype_key][:, stype_idx].numpy()
@@ -418,6 +417,7 @@ def make_snapshot_graph(
     # Generate timestamps based on the main table
     timestamps = generate_timestamps(main_table, interval_days)
 
+    print("******* Time Stamps:", len(timestamps))
     if not timestamps:
         return [], {}  # No valid timestamps, return empty
 
@@ -442,7 +442,7 @@ def make_snapshot_graph(
         
         # Ensure snapshot contains at least one edge
         if not has_edges:
-            print(f"⚠️ Warning: Snapshot at timestamp {ts} has no edges. Skipping it.")
+            print(f" ****** Snapshot at timestamp {ts} has no edges. Skipping it.")
             continue  # Skip this snapshot if no edges exist
 
         snapshot.validate()

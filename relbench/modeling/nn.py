@@ -49,6 +49,7 @@ class HeteroEncoder(nn.Module):
             "attn_dropout": 0.1,      # Standard dropout rate
             "ffn_dropout": 0.1,       # Standard dropout rate
         }
+        
         # Update defaults with any user-provided kwargs
         torch_frame_model_kwargs = {**default_kwargs, **torch_frame_model_kwargs}
 
@@ -56,7 +57,7 @@ class HeteroEncoder(nn.Module):
         for node_type in node_to_col_names_dict.keys():
             col_names_dict = node_to_col_names_dict[node_type]
             torch_frame_model = torch_frame_model_cls(
-                channels=channels,              # Input embedding size
+                channels=channels,  
                 col_stats=node_to_col_stats[node_type],
                 col_names_dict=col_names_dict,
                 out_channels=torch_frame_model_kwargs["out_channels"],
@@ -65,7 +66,6 @@ class HeteroEncoder(nn.Module):
                 encoder_pad_size=torch_frame_model_kwargs["encoder_pad_size"],
                 attn_dropout=torch_frame_model_kwargs["attn_dropout"],
                 ffn_dropout=torch_frame_model_kwargs["ffn_dropout"],
-                # Pass any additional kwargs that might be supported
                 **{k: v for k, v in torch_frame_model_kwargs.items() if k not in default_kwargs},
             )
             self.encoders[node_type] = torch_frame_model

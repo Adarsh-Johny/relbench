@@ -253,14 +253,6 @@ class LinkNeighborLoader(DataLoader):
 
         kwargs.pop("dataset", None)
         kwargs.pop("collate_fn", None)
-        # if share_same_time:
-        #     kwargs.pop("sampler", None)
-        #     kwargs["batch_sampler"] = TimestampSampler(
-        #         src_time,
-        #         kwargs["batch_size"],
-        #     )
-        #     kwargs.pop("batch_size", None)
-
         dataset = CustomLinkDataset(
             self.src_nodes[1],
             dst_nodes[1],
