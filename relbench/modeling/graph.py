@@ -419,7 +419,7 @@ def make_snapshot_graph(
 
     print("******* Time Stamps:", len(timestamps))
     if not timestamps:
-        return [], {}  # No valid timestamps, return empty
+        return [], {}
 
     # Create snapshots at defined timestamps
     for ts in timestamps:
@@ -439,11 +439,10 @@ def make_snapshot_graph(
         # Ensure all nodes from edges are present
         ensure_nodes_from_edges(snapshot)
         
-        
         # Ensure snapshot contains at least one edge
         if not has_edges:
             print(f" ****** Snapshot at timestamp {ts} has no edges. Skipping it.")
-            continue  # Skip this snapshot if no edges exist
+            continue
 
         snapshot.validate()
         data_snapshots.append(snapshot)
@@ -466,7 +465,6 @@ class AttachTargetTransform:
     def __call__(self, batch: HeteroData) -> HeteroData:
         batch[self.entity].y = self.target[batch[self.entity].input_id]
         return batch
-
 
 class NodeTrainTableInput(NamedTuple):
     r"""Training table input for node prediction.

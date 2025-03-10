@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 import torch
 import torch.nn as nn
 from torch import Tensor
@@ -40,14 +40,13 @@ class HeteroEncoder(nn.Module):
         if torch_frame_model_kwargs is None:
             torch_frame_model_kwargs = {}
 
-        # Default values for TabTransformer if not provided in kwargs
         default_kwargs = {
-            "out_channels": channels,  # Match GNN input size
-            "num_layers": 2,          # Reasonable default for transformer layers
-            "num_heads": 4,           # Reasonable default for attention heads
-            "encoder_pad_size": 0,    # No padding by default (adjust if needed)
-            "attn_dropout": 0.1,      # Standard dropout rate
-            "ffn_dropout": 0.1,       # Standard dropout rate
+            "out_channels": channels,  
+            "num_layers": 2,  
+            "num_heads": 4, 
+            "encoder_pad_size": 0,
+            "attn_dropout": 0.1,
+            "ffn_dropout": 0.1, 
         }
         
         # Update defaults with any user-provided kwargs
@@ -89,9 +88,9 @@ class LSTMBasedTemporalEncoder(nn.Module):
         updated_h_dict = {}
         for node_type, lstm in self.lstm_dict.items():
             if node_type in h_dict and h_dict[node_type].size(0) > 0:
-                lstm_input = h_dict[node_type].unsqueeze(0)  # Add batch dimension
+                lstm_input = h_dict[node_type].unsqueeze(0)
                 _, (hn, _) = lstm(lstm_input)
-                updated_h_dict[node_type] = hn.squeeze(0)  # Remove batch dimension
+                updated_h_dict[node_type] = hn.squeeze(0)
         return updated_h_dict
     
     def reset_parameters(self):
@@ -138,16 +137,12 @@ class HeteroGraphSAGE(torch.nn.Module):
             # Ensure that every node type present in x_dict has a valid output.
             for node_type in x_dict.keys():
                 if node_type not in out_dict or out_dict[node_type] is None:
-                    # Replace with the original features or zeros with the correct shape.
                     num_nodes = x_dict[node_type].size(0)
                     out_dict[node_type] = x_dict[node_type]
-                    # Alternatively, if you prefer zeros:
-                    # out_dict[node_type] = torch.zeros((num_nodes, self.gnn.channels), device=x_dict[node_type].device)
             # Apply normalization and activation.
             x_dict = {key: norm_dict[key](out_dict[key]) for key in out_dict.keys()}
             x_dict = {key: x.relu() for key, x in x_dict.items()}
         return x_dict
-
 
 class SnapshotTemporalGNN(nn.Module):
     def __init__(self, node_types, edge_types, input_dim, hidden_dim, num_layers):
